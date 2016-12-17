@@ -3,6 +3,10 @@
 *.a
 *.so
 
+# godeps
+.godeps
+# idea editor
+.idea
 # Folders
 _obj
 _test
