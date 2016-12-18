@@ -23,7 +23,14 @@ func CheckErrorPanic(err error) {
 		return
 	}
 }
-
+func Contains(s []string, e string) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
+}
 func GetDBHandler() *sql.DB{
 	var handler *sql.DB
 	dbinfo := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8", DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME)

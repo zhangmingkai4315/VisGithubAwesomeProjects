@@ -23,19 +23,34 @@ const (
 )
 
 type Repository struct {
-	Url          string
-	User         string
-	Star         int
-	Watch        int
-	Fork         int
-	Status       int
-	ErrorMessage string
+	url          string
+	name         string
+	topic        string
+	star         int
+	watch        int
+	fork         int
+	status       int
+	errorMessage string
+}
+
+type ReposListInterface interface {
+	InsertRepo(topic string, name string, url string)
+}
+type ReposList []Repository
+
+func (rl ReposList) InsertRepo(topic string, name string, url string) {
+	rl = append(rl, Repository{url: url, name: name, topic: topic, star: 0, watch: 0, fork: 0, status: 0, errorMessage: ""})
+}
+
+type ReposQuery struct {
+	tokens    chan (struct{})
+	reposList ReposList
 }
 
 type Store struct {
-	Topic  string
-	Url    string
-	Status int
+	topic  string
+	url    string
+	status int
 }
 
 var StatusList map[int]string
@@ -45,11 +60,11 @@ type AwesomeProjects map[string]*Store
 func (a AwesomeProjects) PutTopicAndUrl(topic string, key string, url string) {
 	_, ok := a[key]
 	if ok == true {
-		a[key].Url = url
-		a[key].Topic = topic
-		a[key].Status = NoStatus
+		a[key].url = url
+		a[key].topic = topic
+		a[key].status = NoStatus
 	} else {
-		a[key] = &Store{Url: url, Topic: topic, Status: NoStatus}
+		a[key] = &Store{url: url, topic: topic, status: NoStatus}
 	}
 	return
 }
@@ -57,12 +72,12 @@ func (a AwesomeProjects) PutTopicAndUrl(topic string, key string, url string) {
 func (a AwesomeProjects) SaveToDatabase(Db *sql.DB) (err error) {
 
 	for k, v := range a {
-		status, ok := StatusList[v.Status]
+		status, ok := StatusList[v.status]
 		if !ok {
 			status = StatusList[0]
 		}
 		Db.Exec("INSERT INTO Category(name, url, topic, status) VALUES(?, ?, ?, ?) ON DUPLICATE KEY UPDATE url=?, topic=?, status=?",
-			k, v.Url, v.Topic, status, v.Url, v.Topic, status)
+			k, v.url, v.topic, status, v.url, v.topic, status)
 		if err != nil {
 			log.Println(err.Error())
 			continue
@@ -70,46 +85,105 @@ func (a AwesomeProjects) SaveToDatabase(Db *sql.DB) (err error) {
 	}
 	return
 }
+
+func (a AwesomeProjects) GetRepos(Db *sql.DB, rq *ReposQuery) {
+	queue := make(chan ReposList)
+	for k, v := range a {
+		if v.url != "" {
+			// put a token into the rq channel (max = 20)
+			rq.tokens <- struct{}{}
+			url := v.url
+			categroyName := k
+			go func(url string, topic string) {
+				// release the token
+				defer func() { <-rq.tokens }()
+
+				// Try to process one of the url
+				fmt.Println(url)
+				rl, err := fetchingUrlData(url, topic)
+				queue <- rl
+				if err != nil {
+					log.Println(err.Error())
+				}
+			}(url, categroyName)
+
+		} else {
+			continue
+		}
+	}
+	go func() {
+		for t := range queue {
+			rq.reposList = append(rq.reposList, t...)
+			log.Println(len(rq.reposList))
+		}
+	}()
+	return
+}
 func (a AwesomeProjects) String() (s string) {
 	//var temp =""
 	for k, v := range a {
-		status, ok := StatusList[v.Status]
+		status, ok := StatusList[v.status]
 		if !ok {
 			status = StatusList[0]
 		}
-		s += fmt.Sprintf("%s : {url:%s,fetched:%v,topic:%s}\n", k, v.Url, status, v.Topic)
+		s += fmt.Sprintf("%s : {url:%s,fetched:%v,topic:%s}\n", k, v.url, status, v.topic)
 		fmt.Printf("%+v %+v", k, v)
 	}
 	return s
 }
 
-func contains(s []string, e string) bool {
-	for _, a := range s {
-		if a == e {
-			return true
-		}
-	}
-	return false
-}
 func getTitleSelections(doc *goquery.Document, selections []*goquery.Selection) []*goquery.Selection {
 	var titleFilter = []string{"Contents", "License"}
 	doc.Find("h2").Each(func(i int, s *goquery.Selection) {
 		//we need filter to remove the useless h2 title.
-		if !contains(titleFilter, s.Text()) && strings.TrimSpace(s.Text()) != "" {
+		if !utils.Contains(titleFilter, s.Text()) && strings.TrimSpace(s.Text()) != "" {
 			selections = append(selections, s)
 		}
+		return
 	})
 	return selections
 }
-func getSelectionsLinks(selections []*goquery.Selection, awesome *AwesomeProjects) {
+func getSelectionsLinks(selections []*goquery.Selection, receiver interface{}) {
+
 	for i := 0; i < len(selections); i++ {
 		topic := selections[i].Text()
 		selections[i].Next().Find("ul li a").Each(func(j int, s *goquery.Selection) {
 			if href, exists := s.Attr("href"); exists {
-				awesome.PutTopicAndUrl(topic, s.Text(), href)
+				if r, ok := receiver.(*AwesomeProjects); ok {
+					r.PutTopicAndUrl(topic, s.Text(), href)
+					return
+				}
 			}
 		})
 	}
+}
+
+func getSelectionsLinksToArray(selections []*goquery.Selection, rl ReposList, topic string) {
+
+	for i := 0; i < len(selections); i++ {
+		topic := selections[i].Text()
+		selections[i].Next().Find("ul li a").Each(func(j int, s *goquery.Selection) {
+			if href, exists := s.Attr("href"); exists {
+				trimedString := strings.TrimPrefix(href, "https://github.com/")
+				if trimedString == href {
+					return
+				}
+				log.Println(href, " Name:", s.Text(), " Topic:", topic)
+			}
+		})
+	}
+}
+
+func fetchingUrlData(url string, topic string) (rplist []Repository, err error) {
+	titleSelections := []*goquery.Selection{}
+	log.Println("Fetching----->" + url)
+	doc, err := goquery.NewDocument(url)
+	if err != nil {
+		return nil, err
+	}
+	titleSelections = getTitleSelections(doc, titleSelections)
+	getSelectionsLinksToArray(titleSelections, rplist, topic)
+	return
 }
 
 func init() {
@@ -128,6 +202,8 @@ func main() {
 	defer Db.Close()
 	err := Db.Ping()
 	utils.CheckErrorPanic(err)
+
+	// Phase 1 Download the awesome list.
 	awsomeProjects = make(map[string]*Store)
 	titleSelections := []*goquery.Selection{}
 	doc, err := goquery.NewDocument(root_url)
@@ -136,4 +212,11 @@ func main() {
 	getSelectionsLinks(titleSelections, &awsomeProjects)
 	err = awsomeProjects.SaveToDatabase(Db)
 	utils.CheckErrorPanic(err)
+
+	//	Phase 2 Scrap each repos.
+
+	var max_jobs = 5
+	ReposQuery := ReposQuery{tokens: make(chan struct{}, max_jobs), reposList: []Repository{}}
+	awsomeProjects.GetRepos(Db, &ReposQuery)
+
 }
