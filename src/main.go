@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	"log"
 	"strings"
+	"utils"
 )
 
 // root_url is the root link to all awesome projects.
@@ -36,6 +38,8 @@ type Store struct {
 	Status int
 }
 
+var StatusList map[int]string
+
 type AwesomeProjects map[string]*Store
 
 func (a AwesomeProjects) PutTopicAndUrl(topic string, key string, url string) {
@@ -49,10 +53,31 @@ func (a AwesomeProjects) PutTopicAndUrl(topic string, key string, url string) {
 	}
 	return
 }
+
+func (a AwesomeProjects) SaveToDatabase(Db *sql.DB) (err error) {
+
+	for k, v := range a {
+		status, ok := StatusList[v.Status]
+		if !ok {
+			status = StatusList[0]
+		}
+		Db.Exec("INSERT INTO Category(name, url, topic, status) VALUES(?, ?, ?, ?) ON DUPLICATE KEY UPDATE url=?, topic=?, status=?",
+			k, v.Url, v.Topic, status, v.Url, v.Topic, status)
+		if err != nil {
+			log.Println(err.Error())
+			continue
+		}
+	}
+	return
+}
 func (a AwesomeProjects) String() (s string) {
 	//var temp =""
 	for k, v := range a {
-		s += fmt.Sprintf("%s : {url:%s,fetched:%v,topic:%s}\n", k, v.Url, v.Status, v.Topic)
+		status, ok := StatusList[v.Status]
+		if !ok {
+			status = StatusList[0]
+		}
+		s += fmt.Sprintf("%s : {url:%s,fetched:%v,topic:%s}\n", k, v.Url, status, v.Topic)
 		fmt.Printf("%+v %+v", k, v)
 	}
 	return s
@@ -72,13 +97,11 @@ func getTitleSelections(doc *goquery.Document, selections []*goquery.Selection) 
 		//we need filter to remove the useless h2 title.
 		if !contains(titleFilter, s.Text()) && strings.TrimSpace(s.Text()) != "" {
 			selections = append(selections, s)
-			fmt.Println(s.Text())
 		}
 	})
 	return selections
 }
 func getSelectionsLinks(selections []*goquery.Selection, awesome *AwesomeProjects) {
-	fmt.Println(len(selections))
 	for i := 0; i < len(selections); i++ {
 		topic := selections[i].Text()
 		selections[i].Next().Find("ul li a").Each(func(j int, s *goquery.Selection) {
@@ -88,16 +111,29 @@ func getSelectionsLinks(selections []*goquery.Selection, awesome *AwesomeProject
 		})
 	}
 }
+
+func init() {
+	StatusList = map[int]string{
+		0: "NoStatus",
+		1: "Start",
+		2: "Fetching",
+		3: "Done",
+		4: "Error",
+	}
+}
+
 func main() {
 	var awsomeProjects AwesomeProjects
+	Db := utils.GetDBHandler()
+	defer Db.Close()
+	err := Db.Ping()
+	utils.CheckErrorPanic(err)
 	awsomeProjects = make(map[string]*Store)
 	titleSelections := []*goquery.Selection{}
 	doc, err := goquery.NewDocument(root_url)
-	if err != nil {
-		log.Fatal(err)
-	}
+	utils.CheckErrorPanic(err)
 	titleSelections = getTitleSelections(doc, titleSelections)
 	getSelectionsLinks(titleSelections, &awsomeProjects)
-	fmt.Println(awsomeProjects)
-
+	err = awsomeProjects.SaveToDatabase(Db)
+	utils.CheckErrorPanic(err)
 }
